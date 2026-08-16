@@ -55,34 +55,44 @@ app.post('/api/claude', async (req, res) => {
 // one call. Replaces the old AI web-search based listing/AVM/tax lookups.
 app.get('/api/property-lookup', async (req, res) => {
   try {
-    const address = req.query.address;
-    if (!address || !address.trim()) {
+    const rawAddress = req.query.address;
+    if (!rawAddress || !rawAddress.trim()) {
       return res.status(400).json({ error: 'address query parameter is required' });
     }
+    const address = rawAddress.trim();
 
-    const url = 'https://real-time-real-estate-data.p.rapidapi.com/property-details-address?address='
-      + encodeURIComponent(address.trim());
-
-    const apiRes = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-rapidapi-host': 'real-time-real-estate-data.p.rapidapi.com',
-        'x-rapidapi-key': RAPIDAPI_KEY
-      }
-    });
-
-    if (!apiRes.ok) {
-      return res.status(apiRes.status).json({ error: 'Upstream API error', status: apiRes.status });
+    async function fetchByAddress(addr) {
+      const url = 'https://real-time-real-estate-data.p.rapidapi.com/property-details-address?address='
+        + encodeURIComponent(addr);
+      const apiRes = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-rapidapi-host': 'real-time-real-estate-data.p.rapidapi.com',
+          'x-rapidapi-key': RAPIDAPI_KEY
+        }
+      });
+      if (!apiRes.ok) return null;
+      const json = await apiRes.json();
+      if (json.status !== 'OK' || !json.data) return null;
+      return json.data;
     }
 
-    const json = await apiRes.json();
+    let d = await fetchByAddress(address);
 
-    if (json.status !== 'OK' || !json.data) {
+    // Hyphenated multi-unit ranges (e.g. "1045-47 East 9th St") sometimes fail
+    // to match. Retry once using just the first unit number (e.g. "1045").
+    if (!d) {
+      const rangeMatch = address.match(/^(\d+)-\d+(\s.*)$/);
+      if (rangeMatch) {
+        d = await fetchByAddress(rangeMatch[1] + rangeMatch[2]);
+      }
+    }
+
+    if (!d) {
       return res.status(404).json({ error: 'Property not found', found: false });
     }
 
-    const d = json.data;
     const resoFacts = d.resoFacts || {};
 
     // Trim price history to the 6 most recent events, and only the fields we need.
@@ -93,6 +103,19 @@ app.get('/api/property-lookup', async (req, res) => {
           price: (typeof p.price === 'number') ? p.price : null
         }))
       : [];
+
+    // Prefer the dated tax history (same source Zillow's own "Public tax
+    // history" table displays) over resoFacts.taxAnnualAmount, which can be
+    // stale or from a different snapshot. Use the most recent year.
+    let taxAnnualAmount = null;
+    if (Array.isArray(d.taxHistory) && d.taxHistory.length) {
+      const sorted = [...d.taxHistory].sort((a, b) => (b.time || 0) - (a.time || 0));
+      const latest = sorted.find(t => typeof t.taxPaid === 'number');
+      if (latest) taxAnnualAmount = latest.taxPaid;
+    }
+    if (taxAnnualAmount === null && typeof resoFacts.taxAnnualAmount === 'number') {
+      taxAnnualAmount = resoFacts.taxAnnualAmount;
+    }
 
     // Normalize into a clean, calculator-friendly shape.
     const normalized = {
@@ -115,7 +138,7 @@ app.get('/api/property-lookup', async (req, res) => {
       livingArea: d.livingArea ?? null,
       yearBuilt: d.yearBuilt ?? null,
 
-      taxAnnualAmount: (typeof resoFacts.taxAnnualAmount === 'number') ? resoFacts.taxAnnualAmount : null,
+      taxAnnualAmount: taxAnnualAmount,
       annualHomeownersInsurance: (typeof d.annualHomeownersInsurance === 'number') ? d.annualHomeownersInsurance : null,
 
       daysOnZillow: d.daysOnZillow ?? null,
