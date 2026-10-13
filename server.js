@@ -156,6 +156,10 @@ app.get('/api/property-lookup', async (req, res) => {
   }
 });
 
+// Shared SMG brand file and logos for every client-facing tool.
+// Short cache so a brand edit shows up on the live pages within minutes.
+app.use('/brand', express.static(require('path').join(__dirname, 'public', 'brand'), { maxAge: '5m' }));
+
 app.get('/health', (req, res) => res.send('ok'));
 app.listen(PORT, () => {
   console.log(`SMG Claude proxy listening on port ${PORT}`);
